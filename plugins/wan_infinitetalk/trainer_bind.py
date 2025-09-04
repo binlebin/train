@@ -290,5 +290,10 @@ def training_step(model_wrapper, batch, conditioners, cfg, noise_scheduler):
     # Forward: x=[noisy16] 4D, y=[y_cond] 4D
     pred = diffusion_model([noisy16], t=t, context=context_list, seq_len=seq_len,
                            clip_fea=clip_fea, y=[y_cond], audio=audio_embs, ref_target_masks=ref_mask)[0]
+
+    # Align noise target to model output shape (handles odd H_lat -> floor*2 after patching)
+    if pred.shape != noise.shape:
+        c, tt, hh, ww = pred.shape
+        noise = noise[:, :tt, :hh, :ww]
     loss = torch.nn.functional.mse_loss(pred, noise)
     return loss
