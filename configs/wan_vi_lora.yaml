@@ -8,11 +8,11 @@ train:
   steps: 8000 # first run; extend later if still improving
   window_frames: 21
   audio_window: 3
-  batch_size: 1
-  grad_accum: 8 # faster wall-clock; slightly noisier per-step gradients, increase to 16 if loss is choppy
-  lr: 1.0e-4
-  wd: 0.0
-  warmup_steps: 500
+  batch_size: 2
+  grad_accum: 4 # faster wall-clock; slightly noisier per-step gradients, increase to 16 if loss is choppy
+  lr: 5.0e-5
+  wd: 1.0e-4
+  warmup_steps: 800
   scheduler: cosine
   bucket: "infinitetalk-480"
 
@@ -25,10 +25,11 @@ data:
 
 lora:
   enabled: true
-  rank: 16
-  alpha: 16
+  rank: 32
+  alpha: 32
   dropout: 0.0 # faster, fine for first run
   target_regex:
+    - "^diffusion_model\\.blocks\\.[0-9]+\\.self_attn\\.o\\.weight$"
     - "^diffusion_model\\.audio_proj\\.(proj1|proj1_vf|proj2|proj3)\\.weight$"
     - "^diffusion_model\\.blocks\\.[0-9]+\\.audio_cross_attn\\.(q_linear|kv_linear|proj)\\.weight$"
 

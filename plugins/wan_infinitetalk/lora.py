@@ -6,6 +6,7 @@ from safetensors.torch import save_file
 TARGET_PATTERNS = [
     re.compile(r"^diffusion_model\.audio_proj\.(proj1|proj1_vf|proj2|proj3)\.weight$"),
     re.compile(r"^diffusion_model\.blocks\.\d+\.audio_cross_attn\.(q_linear|kv_linear|proj)\.weight$"),
+    re.compile(r"^diffusion_model\.blocks\.\d+\.self_attn\.o\.weight$"),
 ]
 
 def _matches(name):
