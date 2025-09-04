@@ -276,10 +276,12 @@ def training_step(model_wrapper, batch, conditioners, cfg, noise_scheduler):
 
     assert audio_embs.dim() == 5, f"audio_embs must be 5D, got {audio_embs.shape}"
 
-    # seq_len like inference
+    # seq_len derived from latent grid with per-dim flooring (matches Conv3d stride behavior)
     patch_size = getattr(cfgc, "patch_size", (1, 2, 2))
-    vae_stride = getattr(cfgc, "vae_stride", (4, 8, 8))
-    seq_len = compute_seq_len(T=T, H=H, W=W, patch_size=patch_size, vae_stride=vae_stride)
+    h_p = H_lat // patch_size[1]
+    w_p = W_lat // patch_size[2]
+    seq_len = int(T_lat * h_p * w_p)
+    print(f"[Info] tokens: seq_len={seq_len}, T_lat={T_lat}, H_lat={H_lat}, W_lat={W_lat}, patch={patch_size}, Hp={h_p}, Wp={w_p}")
 
     # Dummy spatial ref mask to satisfy model's internal conversion
     # Shape expected before interpolate: [C, H, W] (we use C=1)
