@@ -101,6 +101,9 @@ def main():
     scheduler = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda)
 
     # Data
+    def collate_keep(batch):
+        # Keep samples as a list to avoid stacking variable-length tensors (audio_emb)
+        return batch
     train_ds = WanDataset(cfg.data.manifest, split="train")
     # batch_size=1 at 480p is typical; if memory allows you can try 2
     train_dl = DataLoader(
@@ -110,6 +113,7 @@ def main():
         num_workers=4,
         pin_memory=True,
         drop_last=True,
+        collate_fn=collate_keep,
     )
 
     # Conditioners (VAE/CLIP/T5) using config.json names/dtypes
@@ -134,8 +138,16 @@ def main():
     while global_step < cfg.train.steps:
         for batch in train_dl:
             model.train()
+            def compute_loss_batch(b):
+                if isinstance(b, list):
+                    total = 0.0
+                    for sample in b:
+                        total = total + training_step(model, sample, conds, cfg, noise_sched)
+                    return total / len(b)
+                return training_step(model, b, conds, cfg, noise_sched)
+
             with torch.cuda.amp.autocast(enabled=True, dtype=amp_dtype):
-                loss = training_step(model, batch, conds, cfg, noise_sched) / cfg.train.grad_accum
+                loss = compute_loss_batch(batch) / cfg.train.grad_accum
 
             loss.backward()
             accum += 1
