@@ -90,6 +90,8 @@ def prepare_conditioners(model_wrapper, cfg):
                         device=torch.device("cpu"),
                         checkpoint_path=t5_path,
                         tokenizer_path=t5_tok_path)
+    # simple prompt cache to avoid recompute
+    t5._cache = {}
     return vae, clip, t5
 
 
@@ -202,30 +204,58 @@ def training_step(model_wrapper, batch, conditioners, cfg, noise_scheduler):
             vp = vp[0]
         print(f"[Info] Sample: {os.path.basename(vp)}")
 
-    # Video: to [B, C, T, H, W] in [-1,1]
-    v = batch["video"].to(device)
-    if v.dim() == 4:
-        v = v.unsqueeze(0)
-    B, T_full, H, W, C = v.shape
-    v = v.permute(0, 4, 1, 2, 3).float() / 255.0
-    v = (v - 0.5) * 2.0
-
-    # Temporal cropping
-    window_frames = int(getattr(getattr(cfg, "train", None), "window_frames", 81))
-    if T_full > window_frames:
-        s = torch.randint(low=0, high=T_full - window_frames + 1, size=(1,)).item()
-        v_win = v[:, :, s:s + window_frames]
-        T = window_frames
-    else:
-        s = 0
-        v_win = v
-        T = T_full
-
-    # Use precomputed latents if available; else VAE encode current window
+    # Determine if we can skip video processing entirely
     lat_path = batch.get("video_latent_path")
     if isinstance(lat_path, (list, tuple)):
         lat_path = lat_path[0]
-    if isinstance(lat_path, str) and os.path.exists(lat_path):
+    clip_tok_path = batch.get("clip_tokens_path")
+    if isinstance(clip_tok_path, (list, tuple)):
+        clip_tok_path = clip_tok_path[0]
+    has_lat = isinstance(lat_path, str) and os.path.exists(lat_path)
+    has_clip = isinstance(clip_tok_path, str) and os.path.exists(clip_tok_path)
+
+    window_frames = int(getattr(getattr(cfg, "train", None), "window_frames", 81))
+    v = batch["video"].to(device)
+    if has_lat and has_clip:
+        # No video decoding path. We'll derive T_full from clip tokens if possible, else from latents.
+        T_tokens = None
+        try:
+            tok_hdr = torch.load(clip_tok_path, map_location="cpu")
+            T_tokens = int(tok_hdr.shape[0])
+        except Exception:
+            T_tokens = None
+        # Load latents header to get spatial dims and temporal len
+        lat_all_hdr = torch.load(lat_path, map_location="cpu")  # [C_lat, T_lat, H_lat, W_lat]
+        T_lat_hdr = int(lat_all_hdr.shape[1])
+        stride_t = getattr(getattr(cfg, "config", None), "vae_stride", (4,8,8))[0]
+        T_full = T_tokens if T_tokens is not None else T_lat_hdr * max(1, stride_t)
+        if T_full > window_frames:
+            s = torch.randint(low=0, high=T_full - window_frames + 1, size=(1,)).item()
+            T = window_frames
+        else:
+            s = 0
+            T = T_full
+        v_win = None  # not used when clip tokens exist
+        print("[Info] Skip video encoding (using precomputed latents and clip tokens)")
+    else:
+        # Video: to [B, C, T, H, W] in [-1,1]
+        if v.dim() == 4:
+            v = v.unsqueeze(0)
+        B, T_full, H, W, C = v.shape
+        v = v.permute(0, 4, 1, 2, 3).float() / 255.0
+        v = (v - 0.5) * 2.0
+        # Temporal cropping
+        if T_full > window_frames:
+            s = torch.randint(low=0, high=T_full - window_frames + 1, size=(1,)).item()
+            v_win = v[:, :, s:s + window_frames]
+            T = window_frames
+        else:
+            s = 0
+            v_win = v
+            T = T_full
+
+    # Use precomputed latents if available; else VAE encode current window
+    if has_lat:
         lat_all = torch.load(lat_path, map_location="cpu")  # [C_lat, T_lat, H_lat, W_lat]
         lat_all = lat_all.to(device, dtype=next(diffusion_model.parameters()).dtype)
         stride_t = getattr(getattr(cfg, "config", None), "vae_stride", (4,8,8))[0]
@@ -252,15 +282,29 @@ def training_step(model_wrapper, batch, conditioners, cfg, noise_scheduler):
     noise = torch.randn_like(lat16)
     noisy16 = noise_scheduler.add_noise(lat16, noise, t)
 
-    # Text context (CPU -> GPU)
+    # Text context (CPU -> GPU) with caching
     prompt = batch.get("prompt", "")
     prompts = [prompt] if isinstance(prompt, str) else prompt
-    context_list_cpu = t5(prompts, device=torch.device("cpu"))
+    context_list_cpu = []
+    for p in prompts:
+        if p in t5._cache:
+            context_list_cpu.append(t5._cache[p])
+        else:
+            enc = t5([p], device=torch.device("cpu"))[0]
+            t5._cache[p] = enc
+            context_list_cpu.append(enc)
     context_list = [t_.to(device) for t_ in context_list_cpu]
 
-    # CLIP feature (last frame)
-    with torch.no_grad():
-        clip_fea = clip.visual(v_win[:, :, -1:, :, :]).to(lat16.dtype)
+    # CLIP feature (last frame) — prefer precomputed clip tokens
+    clip_fea = None
+    if has_clip:
+        tok = torch.load(clip_tok_path, map_location="cpu")  # [T, 257, 1280]
+        idx = s + (T - 1)
+        idx = max(0, min(int(idx), tok.shape[0] - 1))
+        clip_fea = tok[idx:idx+1].to(device=device, dtype=lat16.dtype)
+    else:
+        with torch.no_grad():
+            clip_fea = clip.visual(v_win[:, :, -1:, :, :]).to(lat16.dtype)
 
     # Audio windows [1, T, window, blocks, dim]
     full_audio_emb = batch["audio_emb"].to(device)
@@ -285,6 +329,10 @@ def training_step(model_wrapper, batch, conditioners, cfg, noise_scheduler):
 
     # Dummy spatial ref mask to satisfy model's internal conversion
     # Shape expected before interpolate: [C, H, W] (we use C=1)
+    # If we skipped video, derive H/W from latents (vae stride on H/W is 8)
+    if has_lat and has_clip:
+        H = H_lat * 8
+        W = W_lat * 8
     ref_mask = torch.ones(1, H, W, device=device, dtype=torch.float32)
    
     # Forward: x=[noisy16] 4D, y=[y_cond] 4D
