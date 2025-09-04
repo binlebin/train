@@ -17,7 +17,7 @@ train:
   bucket: "infinitetalk-480"
 
 data:
-  manifest: /data/dataset_vi_latents.yaml # use precomputed latents
+  manifest: /data/dataset_vi_latents_clip.yaml # use precomputed latents
   fps: 25
   audio_mode: embedding
   audio_key: audio_emb
