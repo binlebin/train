@@ -16,6 +16,7 @@ class WanDataset(Dataset):
         it = self.items[idx]
         video_path = it["video"]
         emb_path = it["audio_emb"]
+        lat_path = it.get("video_latent")
         vframes, _, _ = read_video(video_path, pts_unit="sec")  # [T, H, W, C] uint8
         audio_emb = torch.load(emb_path)  # [T_a, 12, 768] (or normalized later)
         return {
@@ -24,4 +25,5 @@ class WanDataset(Dataset):
             "prompt": it.get("prompt", ""),
             "video_path": video_path,
             "audio_path": emb_path,
+            "video_latent_path": lat_path,
         }

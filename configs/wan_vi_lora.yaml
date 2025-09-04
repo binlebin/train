@@ -2,11 +2,12 @@ model:
   name: wan_infinitetalk
   ckpt_dir: /weights/Wan2.1-I2V-14B-480P
   infinitetalk_dir: /weights/InfiniteTalk/single/infinitetalk.safetensors
+
 train:
   precision: bf16
-  steps: 20000
-  window_frames: 81
-  audio_window: 5
+  steps: 8000 # first run; extend later if still improving
+  window_frames: 33
+  audio_window: 3
   batch_size: 1
   grad_accum: 16
   lr: 1.0e-4
@@ -14,21 +15,23 @@ train:
   warmup_steps: 500
   scheduler: cosine
   bucket: "infinitetalk-480"
+
 data:
-  manifest: /data/dataset_vi.yaml
+  manifest: /data/dataset_vi_latents.yaml # use precomputed latents
   fps: 25
   audio_mode: embedding
   audio_key: audio_emb
   video_key: video
+
 lora:
   enabled: true
-  rank: 32
+  rank: 16
   alpha: 16
-  dropout: 0.05
+  dropout: 0.0 # faster, fine for first run
   target_regex:
     - "^diffusion_model\\.audio_proj\\.(proj1|proj1_vf|proj2|proj3)\\.weight$"
     - "^diffusion_model\\.blocks\\.[0-9]+\\.audio_cross_attn\\.(q_linear|kv_linear|proj)\\.weight$"
+
 log:
   out_dir: /runs/vi_lora_480
-  save_every: 500
-  sample_every: 500
+  save_every: 200 # quicker checkpoints

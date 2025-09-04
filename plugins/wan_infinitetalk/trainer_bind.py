@@ -214,15 +214,27 @@ def training_step(model_wrapper, batch, conditioners, cfg, noise_scheduler):
     window_frames = int(getattr(getattr(cfg, "train", None), "window_frames", 81))
     if T_full > window_frames:
         s = torch.randint(low=0, high=T_full - window_frames + 1, size=(1,)).item()
-        v = v[:, :, s:s + window_frames]
+        v_win = v[:, :, s:s + window_frames]
         T = window_frames
     else:
         s = 0
+        v_win = v
         T = T_full
 
-    # Encode to latents -> [1, C_lat, T_lat, H_lat, W_lat] -> take 16 channels, to 4D
-    lat_5d = encode_video_to_latent(vae, v).to(next(diffusion_model.parameters()).dtype)
-    lat_4d = lat_5d[0]  # [C_lat, T_lat, H_lat, W_lat]
+    # Use precomputed latents if available; else VAE encode current window
+    lat_path = batch.get("video_latent_path")
+    if isinstance(lat_path, (list, tuple)):
+        lat_path = lat_path[0]
+    if isinstance(lat_path, str) and os.path.exists(lat_path):
+        lat_all = torch.load(lat_path, map_location="cpu")  # [C_lat, T_lat, H_lat, W_lat]
+        lat_all = lat_all.to(device, dtype=next(diffusion_model.parameters()).dtype)
+        stride_t = getattr(getattr(cfg, "config", None), "vae_stride", (4,8,8))[0]
+        lat_s = max(0, s // max(1, stride_t))
+        lat_e = max(lat_s + 1, min(lat_all.shape[1], (s + T + stride_t - 1) // max(1, stride_t)))
+        lat_4d = lat_all[:, lat_s:lat_e]
+    else:
+        lat_5d = encode_video_to_latent(vae, v_win).to(next(diffusion_model.parameters()).dtype)
+        lat_4d = lat_5d[0]  # [C_lat, T_lat, H_lat, W_lat]
     if lat_4d.shape[0] >= 16:
         lat16 = lat_4d[:16]
     else:
@@ -248,7 +260,7 @@ def training_step(model_wrapper, batch, conditioners, cfg, noise_scheduler):
 
     # CLIP feature (last frame)
     with torch.no_grad():
-        clip_fea = clip.visual(v[:, :, -1:, :, :]).to(lat16.dtype)
+        clip_fea = clip.visual(v_win[:, :, -1:, :, :]).to(lat16.dtype)
 
     # Audio windows [1, T, window, blocks, dim]
     full_audio_emb = batch["audio_emb"].to(device)
