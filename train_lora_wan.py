@@ -128,6 +128,7 @@ def main():
     scaler = None  # bf16/fp16 mixed precision via autocast only; no GradScaler needed for bf16
 
     start_time = time.time()
+    last_step_wall = start_time
     print(f"[Info] Start training for {cfg.train.steps} steps | bucket={cfg.train.bucket} | precision={cfg.train.precision}")
 
     while global_step < cfg.train.steps:
@@ -140,17 +141,35 @@ def main():
             accum += 1
 
             if accum >= cfg.train.grad_accum:
-                torch.nn.utils.clip_grad_norm_(lora_params, 1.0)
+                # gradient accumulation reached: do one optimization step
+                # 1) clip and record grad-norm
+                grad_norm = torch.nn.utils.clip_grad_norm_(lora_params, 1.0)
+                # 2) optimizer step
                 opt.step()
                 opt.zero_grad(set_to_none=True)
                 scheduler.step()
                 accum = 0
                 global_step += 1
 
+                # per-step wall time
+                now = time.time()
+                step_dur = now - last_step_wall
+                last_step_wall = now
+                micro_avg = step_dur / max(1, cfg.train.grad_accum)
+                mem_alloc = torch.cuda.memory_allocated() / 1e9
+                mem_reserved = torch.cuda.memory_reserved() / 1e9
+                mem_max = torch.cuda.max_memory_allocated() / 1e9
+                print(
+                    f"[Step {global_step:6d}] step_time={step_dur:.2f}s (~{micro_avg:.2f}s/micro) "
+                    f"loss={loss.item()*cfg.train.grad_accum:.4f} lr={scheduler.get_last_lr()[0]:.3e} "
+                    f"grad_norm={float(grad_norm):.3f} mem={mem_alloc:.1f}G alloc/{mem_reserved:.1f}G resv/{mem_max:.1f}G max "
+                    f"eff_batch={cfg.train.batch_size*cfg.train.grad_accum}"
+                )
+
                 if global_step % 50 == 0:
-                    elapsed = time.time() - start_time
+                    elapsed = now - start_time
                     eta = elapsed / max(1, global_step) * (cfg.train.steps - global_step)
-                    print(f"[Step {global_step:6d}] loss={loss.item()*cfg.train.grad_accum:.4f} lr={scheduler.get_last_lr()[0]:.3e} eta={eta/3600:.2f}h")
+                    print(f"[Step {global_step:6d}] elapsed={elapsed/3600:.2f}h eta={eta/3600:.2f}h")
 
                 if global_step % max(1, cfg.log.save_every) == 0:
                     out = os.path.join(cfg.log.out_dir, f"step_{global_step}.safetensors")
